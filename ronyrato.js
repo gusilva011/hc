@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Ronyrato
 // @namespace    http://tampermonkey.net/
-// @version      46.6
-// @description  PVP + Macros + Volleyball Auto-play + DoubleClick (FINAL)
-// @author       You
+// @version      1.0
+// @description  chilenito finalboss
+// @author       healing
 // @match        https://*.habblet.city/*
 // @grant        none
 // @run-at       document-start
