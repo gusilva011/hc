@@ -650,7 +650,7 @@
 <div class="xdv"></div><div class="xl">Modo Automático</div>
 <div class="xtr"><span>Auto</span><div class="xtg" id="rxAM"></div></div>
 <div class="xtr"><span>Auto sem flood</span><div class="xtg" id="rxANF"></div></div>
-<button class="xb xbme" id="rxME">clica em tu pra ativar</button>
+<button class="xb xbme" id="rxME">teste de update</button>
 <div class="xdv"></div>
 <div class="xtr"><span>Hotkey</span><div class="xtg on" id="rxHK"></div></div>
 <div class="xtr"><span>Segurar</span><div class="xtg" id="rxHH"></div></div>
