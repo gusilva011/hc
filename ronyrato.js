@@ -148,6 +148,14 @@
     const H_FURNI_UPDATE=0x0168;
     const H_ROLLER=0x022e;
     const H_PRECLICK=0x01af;
+    const H_CLICK_ACK=0x043f;
+    const H_COUNTER=0x048f;
+
+    // ═══ ROOMIDX TRACKER — detecção + correção automática ═══
+    let ridxLastAck=0,ridxMisses=0,ridxConfirmed=false;
+    let ridxScanning=false,ridxScanVal=-1,ridxScanTimer=null;
+    let ridxUserMap=new Map();  // userId → último roomIdx confirmado
+    let ridxPendingPC=-1;       // preclick pendente (pra associar com o click seguinte)
 
     // ═══ PRE-CLICK — auto roomIdx (aceita qualquer valor) ═══
     let preClickVal=0;
@@ -171,14 +179,19 @@
     const _clickBuf=new ArrayBuffer(10),_clickDv=new DataView(_clickBuf);
     _clickDv.setInt32(0,6);_clickDv.setInt16(4,H_CLICK);
 
-    // ═══ sendClick — preclick (roomIdx auto, qualquer valor) + click ═══
+    // ═══ Flag para pular hookSend em pacotes internos (flood fallback) ═══
+    let _internalSend=false;
+
+    // ═══ sendClick — preclick + click (2 sends, servidor exige 1 pkt por msg) ═══
     function sendClick(uid){
         const u=users.get(uid);
         const ridx=(u&&u.roomIdx>=0)?u.roomIdx:preClickVal;
+        _internalSend=true;
         _preClickDv.setInt32(6,ridx);
         rawSend(_preClickBuf);
         _clickDv.setInt32(6,uid);
         rawSend(_clickBuf);
+        _internalSend=false;
     }
 
     function buildClick(uid){const b=new ArrayBuffer(10),v=new DataView(b);v.setInt32(0,6);v.setInt16(4,H_CLICK);v.setInt32(6,uid);return b;}
@@ -250,19 +263,36 @@
         }
     }
 
-    // ═══ WEBSOCKET WORKER PROXY + FLOOD NATIVO ═══
+    // ═══ WEBSOCKET WORKER PROXY + FLOOD NATIVO (v47.1) ═══
     const WORKER_CODE=`
     let ws=null,url=null,proto=null;
-    let floodTimer=null,floodUid=0,floodMs=68,floodRIdx=0;
+    let floodActive=false,floodUid=0,floodMs=68,floodRIdx=0;
+
     const pcBuf=new ArrayBuffer(10),pcDv=new DataView(pcBuf);
     pcDv.setInt32(0,6);pcDv.setInt16(4,0x01af);
     const ckBuf=new ArrayBuffer(10),ckDv=new DataView(ckBuf);
     ckDv.setInt32(0,6);ckDv.setInt16(4,0x082b);
+
     function floodTick(){
         if(!ws||ws.readyState!==1||!floodUid)return;
         pcDv.setInt32(6,floodRIdx);ws.send(pcBuf);
         ckDv.setInt32(6,floodUid);ws.send(ckBuf);
     }
+
+    // ═══ MessageChannel loop: ~1ms precisão vs ~4-15ms do setInterval ═══
+    const mc=new MessageChannel();
+    const port=mc.port1;
+    let floodNext=0;
+    mc.port2.onmessage=function(){
+        if(!floodActive)return;
+        const now=performance.now();
+        if(now>=floodNext){
+            floodTick();
+            floodNext=now+floodMs;
+        }
+        port.postMessage(null);
+    };
+
     self.onmessage=function(e){
         const m=e.data;
         if(m.type==='connect'){
@@ -289,14 +319,15 @@
             if(ws)try{ws.close(m.code,m.reason);}catch(e){}
         }else if(m.type==='flood_start'){
             floodUid=m.uid||0;floodMs=m.ms||68;floodRIdx=m.ridx||0;
-            if(floodTimer)clearInterval(floodTimer);
-            floodTick();floodTimer=setInterval(floodTick,floodMs);
+            floodActive=true;
+            floodNext=performance.now();
+            port.postMessage(null);
         }else if(m.type==='flood_stop'){
-            if(floodTimer){clearInterval(floodTimer);floodTimer=null;}
+            floodActive=false;
         }else if(m.type==='flood_update'){
             if(m.uid!==undefined)floodUid=m.uid;
             if(m.ridx!==undefined)floodRIdx=m.ridx;
-            if(m.ms!==undefined&&floodTimer){floodMs=m.ms;clearInterval(floodTimer);floodTimer=setInterval(floodTick,floodMs);}
+            if(m.ms!==undefined)floodMs=m.ms;
         }
     };`;
 
@@ -407,11 +438,13 @@
     };
     window.WebSocket.prototype=_p;window.WebSocket.CONNECTING=_WS.CONNECTING;window.WebSocket.OPEN=_WS.OPEN;window.WebSocket.CLOSING=_WS.CLOSING;window.WebSocket.CLOSED=_WS.CLOSED;Object.setPrototypeOf(window.WebSocket,_WS);
 
-    function clearRoom(r){const h=users.size>0;users.clear();roomIdxMap.clear();prevPos.clear();vBallPos=null;vLastHitTile=null;vDetectedBallId=0;vCoordBounds=null;vAllTilesCache=null;vZoneSets=null;preClickVal=0;if(looping&&!persistFlood&&!autoMode)stopFlood();uiUsers();uiTarget();uiStatus();uiVU();uiVS();if(r&&h)log(`🚪 ${r}`);}
+    function clearRoom(r){const h=users.size>0;users.clear();roomIdxMap.clear();prevPos.clear();vBallPos=null;vLastHitTile=null;vDetectedBallId=0;vCoordBounds=null;vAllTilesCache=null;vZoneSets=null;preClickVal=0;ridxLastAck=0;ridxMisses=0;ridxConfirmed=false;ridxScanning=false;ridxScanVal=-1;ridxPendingPC=-1;ridxUserMap.clear();if(ridxScanTimer){clearTimeout(ridxScanTimer);ridxScanTimer=null;}if(looping&&!persistFlood&&!autoMode)stopFlood();uiUsers();uiTarget();uiStatus();uiVU();uiVS();if(r&&h)log(`🚪 ${r}`);}
 
     function hookSend(ws){
         const _s=ws.send.bind(ws);rawSend=_s;
         ws.send=function(data){
+            // ═══ BYPASS: pacotes internos do flood pula toda análise ═══
+            if(_internalSend)return _s(data);
             try{
                 let buf;if(data instanceof ArrayBuffer)buf=data;else if(data instanceof Uint8Array)buf=data.buffer;else return _s(data);
                 const hdr=gH(buf);
@@ -420,8 +453,23 @@
                     if(settingMyId&&cid>0){myId=cid;settingMyId=false;log(`👤 Eu = ${users.get(cid)?.name||cid}`);const btn=document.getElementById('rxME');if(btn){btn.textContent=`👤 ${users.get(cid)?.name||cid}`;btn.classList.remove('rec');btn.classList.add('ok');}uiUsers();uiVU();uiVS();return _s(data);}
                     if(cid>0&&cid!==selId&&!whitelist.has(cid)&&cid!==myId){selId=cid;if(!users.has(cid))users.set(cid,{id:cid,name:`User #${cid}`,roomIdx:-1,x:-1,y:-1,dx:-1,dy:-1,tmp:true});lastTarget={id:cid,name:users.get(cid)?.name||`#${cid}`};uiUsers();uiTarget();if(looping){stopFlood();startFlood();}}
                 }
-                // ═══ FIX: Captura preClickVal de QUALQUER packet 0x01af (nosso ou do jogo) ═══
-                if(hdr===H_PRECLICK&&buf.byteLength>=10){const pv=new DataView(buf).getInt32(6);if(pv!==preClickVal&&pv>=0){preClickVal=pv;log(`🔄 PreClick → ${pv}`);}}
+                // ═══ FIX: Captura preClickVal + associa roomIdx ao userId clicado ═══
+                if(hdr===H_PRECLICK&&buf.byteLength>=10){const pv=new DataView(buf).getInt32(6);if(pv>=0){preClickVal=pv;ridxPendingPC=pv;}}
+                if(hdr===H_CLICK&&buf.byteLength>=10&&ridxPendingPC>=0){
+                    // Jogo mandou preclick(X) + click(Y) → sabemos que roomIdx X pertence ao userId Y
+                    const cid=new DataView(buf).getInt32(6);
+                    if(cid>0){
+                        ridxUserMap.set(cid,ridxPendingPC);
+                        const u=users.get(cid);
+                        if(u&&(u.roomIdx<0||u.roomIdx!==ridxPendingPC)){
+                            // Remover mapeamento antigo se existir
+                            if(u.roomIdx>=0){for(const[idx,id]of roomIdxMap){if(id===cid){roomIdxMap.delete(idx);break;}}}
+                            u.roomIdx=ridxPendingPC;
+                            roomIdxMap.set(ridxPendingPC,cid);
+                        }
+                    }
+                    ridxPendingPC=-1;
+                }
                 if(hdr===H_WALK&&buf.byteLength>=14){const wdv=new DataView(buf),wx=wdv.getInt32(6),wy=wdv.getInt32(10);if(wx>=0&&wx<=500&&wy>=0&&wy<=500){if(vRec)vRecCapture(wx,wy);if((autoMode||autoNoFlood)&&myId)autoCheck();}}
                 if(!chatHeader&&hdr!==H_CLICK&&hdr!==H_PRECLICK&&hdr!==H_WALK&&hdr!==H_FURNI&&buf.byteLength>=12&&buf.byteLength<=500){try{const cdv=new DataView(buf),slen=cdv.getUint16(6);if(slen>0&&slen<300&&8+slen+4<=buf.byteLength){let str='';for(let ci=0;ci<slen;ci++)str+=String.fromCharCode(cdv.getUint8(8+ci));if(str.length>=1&&/^[\x20-\x7E\u00A0-\uFFFF]+$/.test(str)&&cdv.getInt32(8+slen)>=0&&cdv.getInt32(8+slen)<=50){chatHeader=hdr;queueMicrotask(()=>{const cd=document.getElementById('rxCD');if(cd)cd.className='xm-dot on';const sp=cd?.nextElementSibling;if(sp)sp.textContent='Chat detectado';});}}}catch(e){}}
                 return _s(data);
@@ -478,6 +526,8 @@
         if(hdr===H_MODEL){clearRoom('Nova sala');return;}
         if(hdr===H_USERS){parseUsers(buf);return;}
         if(hdr===H_STATUS){parseStatus(buf);return;}
+        if(hdr===H_CLICK_ACK&&buf.byteLength>=14){onClickAck(dv);return;}
+        if(hdr===H_COUNTER&&buf.byteLength>=18){onCounter(dv);return;}
         if(hdr!==H_FSTATE)tryRemove(buf,hdr);
     }
 
@@ -489,7 +539,7 @@
         if(first){if(first.user.type===1)found.push(first.user);o=first.endOff;}
         else{const s=scanUser(dv,o);if(!s)return;if(s.result.user.type===1)found.push(s.result.user);o=s.result.endOff;}
         for(let i=1;i<count.v;i++){const s=scanUser(dv,o);if(!s)break;if(s.result.user.type===1)found.push(s.result.user);o=s.result.endOff;}
-        if(found.length>=1){found.forEach(u=>{users.set(u.id,u);roomIdxMap.set(u.roomIdx,u.id);if(selId===u.id)lastTarget={id:u.id,name:u.name};});if(myId&&users.has(myId)){const btn=document.getElementById('rxME');if(btn&&!btn.classList.contains('ok')){btn.textContent=`👤 ${users.get(myId).name}`;btn.classList.add('ok');}}uiUsers();uiTarget();uiVU();uiVS();}
+        if(found.length>=1){found.forEach(u=>{const oldU=users.get(u.id);const oldIdx=oldU?oldU.roomIdx:-1;users.set(u.id,u);roomIdxMap.set(u.roomIdx,u.id);ridxUserMap.set(u.id,u.roomIdx);if(selId===u.id){lastTarget={id:u.id,name:u.name};if(oldIdx>=0&&oldIdx!==u.roomIdx&&looping){if(isWorkerSocket&&gs?.floodUpdate)gs.floodUpdate({ridx:u.roomIdx});ridxConfirmed=false;}}});if(myId&&users.has(myId)){const btn=document.getElementById('rxME');if(btn&&!btn.classList.contains('ok')){btn.textContent=`👤 ${users.get(myId).name}`;btn.classList.add('ok');}}uiUsers();uiTarget();uiVU();uiVS();}
     }catch(e){}}
     function parseStatus(buf){try{const dv=new DataView(buf);let o=6;const count=rInt(dv,o);if(!count)return;o=count.n;if(count.v<1||count.v>200)return;let ch=false;
         for(let i=0;i<count.v;i++){const ri=rInt(dv,o);if(!ri)return;o=ri.n;const x=rInt(dv,o);if(!x)return;o=x.n;const y=rInt(dv,o);if(!y)return;o=y.n;const z=rStr(dv,o);if(!z)return;o=z.n;const bd=rInt(dv,o);if(!bd)return;o=bd.n;const hd=rInt(dv,o);if(!hd)return;o=hd.n;const act=rStr(dv,o);if(!act)return;o=act.n;if(x.v<0||x.v>500||y.v<0||y.v>500)continue;const uid=roomIdxMap.get(ri.v);if(!uid||!users.has(uid))continue;const u=users.get(uid);
@@ -525,13 +575,120 @@
     function tryRemove(buf,hdr){if(buf.byteLength<8||buf.byteLength>20||users.size===0)return;try{const dv=new DataView(buf),str=rStr(dv,6);if(str&&/^\-?\d+$/.test(str.v)){const idx=parseInt(str.v);if(idx>=0&&idx<2000){const uid=roomIdxMap.get(idx);if(uid&&users.has(uid)){users.delete(uid);roomIdxMap.delete(idx);uiUsers();uiVU();}}}else if(buf.byteLength===10){const idx=dv.getInt32(6);if(idx>=0&&idx<2000){const uid=roomIdxMap.get(idx);if(uid&&users.has(uid)){users.delete(uid);roomIdxMap.delete(idx);uiUsers();uiVU();}}}}catch(e){}}
 
     // ═══ FLOOD — Worker nativo quando disponível ═══
-    function getTargetRIdx(){const u=selId?users.get(selId):null;return(u&&u.roomIdx>=0)?u.roomIdx:preClickVal;}
+    // ═══ getTargetRIdx: resolução multi-fonte (u.roomIdx → ridxUserMap → preClickVal) ═══
+    function getTargetRIdx(){
+        if(ridxScanning)return ridxScanVal;
+        const u=selId?users.get(selId):null;
+        if(u&&u.roomIdx>=0)return u.roomIdx;
+        if(ridxUserMap.has(selId))return ridxUserMap.get(selId);
+        return preClickVal;
+    }
     function doClick(){if(gs?.readyState!==WebSocket.OPEN||!selId)return;sendClick(selId);}
-    function startFlood(){if(!selId||gs?.readyState!==WebSocket.OPEN)return;looping=true;if(isWorkerSocket&&gs.floodStart){gs.floodStart(selId,ms,getTargetRIdx());}else{doClick();loopTimer=setInterval(doClick,ms);}queueMicrotask(()=>uiStatus());}
-    function stopFlood(){if(isWorkerSocket&&gs?.floodStop)gs.floodStop();if(loopTimer){clearInterval(loopTimer);loopTimer=null;}looping=false;uiStatus();}
+    function startFlood(){if(!selId||gs?.readyState!==WebSocket.OPEN)return;looping=true;ridxMisses=0;ridxLastAck=Date.now();ridxConfirmed=false;ridxScanning=false;ridxScanVal=-1;if(ridxScanTimer){clearTimeout(ridxScanTimer);ridxScanTimer=null;}if(isWorkerSocket&&gs.floodStart){gs.floodStart(selId,ms,getTargetRIdx());}else{doClick();loopTimer=setInterval(doClick,ms);}startRidxMonitor();queueMicrotask(()=>uiStatus());}
+    function stopFlood(){if(isWorkerSocket&&gs?.floodStop)gs.floodStop();if(loopTimer){clearInterval(loopTimer);loopTimer=null;}looping=false;ridxScanning=false;ridxScanVal=-1;if(ridxScanTimer){clearTimeout(ridxScanTimer);ridxScanTimer=null;}uiStatus();}
 
-    // ═══ DNA PARTICLES ═══
-    let dnaCanvas=null,dnaAnim=null,dnaP=[];
+    // ═══ ROOMIDX MONITOR — detecta falha e inicia scan automático ═══
+    function startRidxMonitor(){
+        if(ridxScanTimer)clearTimeout(ridxScanTimer);
+        ridxScanTimer=setTimeout(ridxCheck,2500);
+    }
+    function ridxCheck(){
+        ridxScanTimer=null;
+        if(!looping||!selId)return;
+        const elapsed=Date.now()-ridxLastAck;
+        // Se >2.5s sem ACK nenhum, roomIdx provavelmente errado → iniciar scan
+        if(elapsed>2500&&!ridxConfirmed){
+            ridxStartScan();
+        }else{
+            // Continuar monitorando
+            ridxScanTimer=setTimeout(ridxCheck,2000);
+        }
+    }
+    function ridxStartScan(){
+        ridxScanning=true;
+        // Coletar todos os roomIdx conhecidos + range 0..max+5
+        const known=new Set();
+        for(const[idx]of roomIdxMap)known.add(idx);
+        for(const[,u]of users)if(u.roomIdx>=0)known.add(u.roomIdx);
+        for(const[,idx]of ridxUserMap)known.add(idx);
+        known.add(preClickVal);
+        // Gerar lista de candidatos: conhecidos primeiro, depois range sequencial
+        const maxIdx=Math.max(30,...known);
+        const candidates=[...known];
+        for(let i=0;i<=maxIdx;i++)if(!known.has(i))candidates.push(i);
+        ridxScanVal=0;
+        ridxScanIdx=0;
+        ridxScanList=candidates;
+        ridxTryScan();
+    }
+    let ridxScanIdx=0,ridxScanList=[];
+    function ridxTryScan(){
+        if(!looping||!selId||!ridxScanning)return;
+        if(ridxScanIdx>=ridxScanList.length){
+            // Esgotou candidatos, recomeçar do zero
+            ridxScanIdx=0;
+        }
+        ridxScanVal=ridxScanList[ridxScanIdx];
+        ridxScanIdx++;
+        // Atualizar Worker com novo candidato
+        if(isWorkerSocket&&gs?.floodUpdate)gs.floodUpdate({ridx:ridxScanVal});
+        // Esperar um tempo pelo ACK antes de tentar o próximo
+        ridxScanTimer=setTimeout(()=>{
+            if(ridxScanning&&looping){
+                ridxTryScan();
+            }
+        },500);
+    }
+
+    // ═══ onClickAck — chamado quando servidor confirma click (0x043f) ═══
+    function onClickAck(dv){
+        const uid=dv.getInt32(6);
+        ridxLastAck=Date.now();
+        ridxMisses=0;
+        if(looping&&uid===selId){
+            if(ridxScanning){
+                // SCAN ACERTOU — este roomIdx é o correto!
+                ridxScanning=false;
+                ridxConfirmed=true;
+                if(ridxScanTimer){clearTimeout(ridxScanTimer);ridxScanTimer=null;}
+                const correctIdx=ridxScanVal;
+                // Atualizar todas as fontes
+                const u=users.get(selId);
+                if(u){
+                    // Remover mapeamento antigo
+                    for(const[idx,id]of roomIdxMap){if(id===selId){roomIdxMap.delete(idx);break;}}
+                    u.roomIdx=correctIdx;
+                    roomIdxMap.set(correctIdx,selId);
+                }
+                ridxUserMap.set(selId,correctIdx);
+                preClickVal=correctIdx;
+                // Garantir Worker usa o valor correto
+                if(isWorkerSocket&&gs?.floodUpdate)gs.floodUpdate({ridx:correctIdx});
+                // Reiniciar monitoramento
+                startRidxMonitor();
+            }else{
+                ridxConfirmed=true;
+                // Reiniciar monitor
+                if(!ridxScanTimer)startRidxMonitor();
+            }
+        }
+    }
+
+    // ═══ onCounter — 0x048f, primeiro campo = roomIdx do alvo ═══
+    function onCounter(dv){
+        const ridx=dv.getInt32(6);
+        if(looping&&selId&&ridx>=0){
+            // Counter confirma roomIdx — se bate, tudo certo
+            const curIdx=getTargetRIdx();
+            if(ridx===curIdx)ridxConfirmed=true;
+        }
+    }
+
+    // ═══ DNA PARTICLES (otimizado — para RAF quando painel fecha) ═══
+    let dnaCanvas=null,dnaAnim=null,dnaP=[],dnaRunning=false;
+    function startDNA(){if(dnaRunning||!dnaCanvas)return;dnaRunning=true;dnaAnim=requestAnimationFrame(dnaDraw);}
+    function stopDNA(){dnaRunning=false;if(dnaAnim){cancelAnimationFrame(dnaAnim);dnaAnim=null;}}
+    let dnaDraw;
     function initDNA(el){
         dnaCanvas=document.createElement('canvas');
         dnaCanvas.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;border-radius:12px';
@@ -539,10 +696,10 @@
         const N=65,LINK=110;
         const cols=['255,255,255'];
         function mk(w,h){return{x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-0.5)*0.7,vy:(Math.random()-0.5)*0.7,r:1.5+Math.random()*2.5,c:cols[Math.floor(Math.random()*cols.length)],a:0.6+Math.random()*0.4,ph:Math.random()*6.28,ps:0.6+Math.random()*1.8};}
-        const draw=()=>{
-            if(!panelOpen){dnaAnim=requestAnimationFrame(draw);return;}
+        dnaDraw=()=>{
+            if(!dnaRunning)return;
             const w=dnaCanvas.width=dnaCanvas.offsetWidth*2,h=dnaCanvas.height=dnaCanvas.offsetHeight*2;
-            if(!w||!h){dnaAnim=requestAnimationFrame(draw);return;}
+            if(!w||!h){dnaAnim=requestAnimationFrame(dnaDraw);return;}
             const ctx=dnaCanvas.getContext('2d');ctx.clearRect(0,0,w,h);
             while(dnaP.length<N)dnaP.push(mk(w,h));
             for(let i=dnaP.length-1;i>=0;i--){
@@ -553,8 +710,9 @@
             }
             for(let i=0;i<dnaP.length;i++){const a=dnaP[i];for(let j=i+1;j<dnaP.length;j++){const b=dnaP[j];const dx=a.x-b.x,dy=a.y-b.y,d=Math.sqrt(dx*dx+dy*dy);if(d<LINK){const al=(1-d/LINK)*0.35*Math.min(a.a,b.a)*2;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.strokeStyle=`rgba(${a.c},${al.toFixed(3)})`;ctx.lineWidth=1+al*3;ctx.stroke();}}}
             for(const p of dnaP){const gl=0.5+0.5*Math.sin(p.ph),al=p.a*gl;ctx.beginPath();ctx.arc(p.x,p.y,p.r*5+gl*7,0,6.28);ctx.fillStyle=`rgba(${p.c},${(al*0.12).toFixed(3)})`;ctx.fill();ctx.beginPath();ctx.arc(p.x,p.y,p.r*3+gl*3,0,6.28);ctx.fillStyle=`rgba(${p.c},${(al*0.25).toFixed(3)})`;ctx.fill();ctx.beginPath();ctx.arc(p.x,p.y,p.r*1.2+gl*0.8,0,6.28);ctx.fillStyle=`rgba(${p.c},${(al*0.85).toFixed(3)})`;ctx.fill();ctx.beginPath();ctx.arc(p.x,p.y,p.r*0.5,0,6.28);ctx.fillStyle=`rgba(255,255,255,${(al*0.7).toFixed(3)})`;ctx.fill();}
-            dnaAnim=requestAnimationFrame(draw);
-        };draw();
+            dnaAnim=requestAnimationFrame(dnaDraw);
+        };
+        if(panelOpen)startDNA();
     }
 
     // ═══ UI PANEL ═══
@@ -750,7 +908,7 @@ ${[2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type="
         document.getElementById('rxVRCL').addEventListener('click',e=>{e.stopPropagation();vCustomPos[parseInt(document.getElementById('rxVRP').value)||0]=[];uiRC();});
         document.getElementById('rxVEXP').addEventListener('click',function(e){e.stopPropagation();const out={};vCustomPos.forEach((z,i)=>{if(z.length>0)out[`pos${i+1}`]=z;});navigator.clipboard.writeText(JSON.stringify(out,null,2)).then(()=>{this.textContent='✓';setTimeout(()=>{this.textContent='Export';},1200);}).catch(()=>{});});
         document.getElementById('rxVIMP').addEventListener('click',function(e){e.stopPropagation();const j=prompt('JSON:');if(!j)return;try{const d=JSON.parse(j);const ks=Object.keys(d);if(ks.some(k=>k.startsWith('blue')||k.startsWith('green'))){['blue1','blue2','blue3','green1','green2','green3'].forEach((k,i)=>{if(d[k])vCustomPos[i]=d[k].map(v=>Array.isArray(v)?v:[v.x,v.y]);});}else{ks.forEach(k=>{const m=k.match(/(\d+)/);if(m){const i=parseInt(m[1])-1;if(i>=0&&i<6)vCustomPos[i]=d[k].map(v=>Array.isArray(v)?v:[v.x,v.y]);}});}uiRC();this.textContent='✓';setTimeout(()=>{this.textContent='Import';},1200);}catch(err){}});
-        uiRC();log('v46.6');
+        uiRC();log('v47.5 — roomIdx auto-detect');
     }
 
     function uiRC(){const i=parseInt(document.getElementById('rxVRP')?.value)||0;const el=document.getElementById('rxVRC');if(el)el.textContent=`${vCustomPos[i].length} tiles`;}
@@ -808,7 +966,7 @@ ${[2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type="
     },{capture:true});
 
     document.addEventListener('keydown',e=>{
-        if(e.keyCode===119){e.preventDefault();panelOpen=!panelOpen;document.getElementById('rx')?.classList.toggle('vis',panelOpen);return;}
+        if(e.keyCode===119){e.preventDefault();panelOpen=!panelOpen;document.getElementById('rx')?.classList.toggle('vis',panelOpen);panelOpen?startDNA():stopDNA();return;}
         if(e.keyCode===112)return;
         const fm=e.key.match(/^F([2-7])$/);
         if(fm){
@@ -839,7 +997,7 @@ ${[2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type="
         img.className='rx-img';
         img.style.backgroundImage="url('data:image/png;base64,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')";
         i.appendChild(img);
-        i.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();panelOpen=!panelOpen;document.getElementById('rx')?.classList.toggle('vis',panelOpen);});
+        i.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();panelOpen=!panelOpen;document.getElementById('rx')?.classList.toggle('vis',panelOpen);panelOpen?startDNA():stopDNA();});
         container.appendChild(i);
     }
 
