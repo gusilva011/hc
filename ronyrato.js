@@ -61,7 +61,7 @@
     let autoMode=false,autoNoFlood=false,autoDelayTimer=null,autoDelayMs=85;
     let chatHeader=null;
     let isWorkerSocket=false;
-    let macros=[{text:':push',withTarget:true},{text:':pull',withTarget:true},{text:'',withTarget:false},{text:'',withTarget:false},{text:'',withTarget:false},{text:'',withTarget:false},{text:'',withTarget:false}];
+    let macros=[{text:':push',withTarget:true},{text:':pull',withTarget:true},{text:'',withTarget:false},{text:'',withTarget:false},{text:'',withTarget:false},{text:'',withTarget:false}];
 
     // ═══ DOUBLECLICK ═══
     let dcMouseEnabled=false, dcF1Enabled=false;
@@ -186,7 +186,7 @@
     function buildWalk(x,y){const b=new ArrayBuffer(14),v=new DataView(b);v.setInt32(0,10);v.setInt16(4,H_WALK);v.setInt32(6,x);v.setInt32(10,y);return b;}
     function buildChat(msg){if(!chatHeader)return null;const e=new TextEncoder().encode(msg),tl=2+2+e.length+4+4,b=new ArrayBuffer(4+tl),v=new DataView(b);v.setInt32(0,tl);v.setInt16(4,chatHeader);v.setUint16(6,e.length);new Uint8Array(b,8,e.length).set(e);v.setInt32(8+e.length,0);v.setInt32(8+e.length+4,0);return b;}
     function sendRaw(buf){if(gs?.readyState===WebSocket.OPEN)try{(rawSend||gs.send.bind(gs))(buf);}catch(e){}}
-    function sendMacro(i){const m=macros[i];if(!m?.text||!chatHeader)return;let msg=m.text;if(m.withTarget){const tn=lastTarget?.name||(selId?users.get(selId)?.name:null);if(!tn)return;msg+=' '+tn;}const p=buildChat(msg);if(p){sendRaw(p);log(`📨 F${i+1}: ${msg}`);}}
+    function sendMacro(i){const m=macros[i];if(!m?.text||!chatHeader)return;let msg=m.text;if(m.withTarget){const tn=lastTarget?.name||(selId?users.get(selId)?.name:null);if(!tn)return;msg+=' '+tn;}const p=buildChat(msg);if(p){sendRaw(p);log(`📨 F${i+2}: ${msg}`);}}
 
     // ═══ BALL DETECTION ═══
     function tryFurniUpdate(buf,dv,hdr){
@@ -495,7 +495,7 @@
         for(let i=0;i<count.v;i++){const ri=rInt(dv,o);if(!ri)return;o=ri.n;const x=rInt(dv,o);if(!x)return;o=x.n;const y=rInt(dv,o);if(!y)return;o=y.n;const z=rStr(dv,o);if(!z)return;o=z.n;const bd=rInt(dv,o);if(!bd)return;o=bd.n;const hd=rInt(dv,o);if(!hd)return;o=hd.n;const act=rStr(dv,o);if(!act)return;o=act.n;if(x.v<0||x.v>500||y.v<0||y.v>500)continue;const uid=roomIdxMap.get(ri.v);if(!uid||!users.has(uid))continue;const u=users.get(uid);
             if(u.x!==x.v||u.y!==y.v){prevPos.set(uid,{x:u.x,y:u.y});u.x=x.v;u.y=y.v;ch=true;if(uid===myId&&vEnabled)detectMyPos(x.v,y.v);}
             const mv=MV_REGEX.exec(act.v);if(mv){const nx=parseInt(mv[1]),ny=parseInt(mv[2]);if(u.dx!==nx||u.dy!==ny){u.dx=nx;u.dy=ny;ch=true;if(uid===myId&&vEnabled)detectMyPos(nx,ny);}}else if(u.dx!==x.v||u.dy!==y.v){u.dx=x.v;u.dy=y.v;ch=true;}}
-        if(ch){uiPositions();uiVS();if((autoMode||autoNoFlood)&&myId)autoCheck();}
+        if(ch){uiPositions();uiVS();if((autoMode||autoNoFlood)&&myId)autoCheck();if(looping&&selId&&isWorkerSocket&&gs?.floodUpdate){const ridx=getTargetRIdx();gs.floodUpdate({ridx});}}
     }catch(e){}}
 
     // ═══ QUICK TARGET ═══
@@ -524,11 +524,11 @@
 
     function tryRemove(buf,hdr){if(buf.byteLength<8||buf.byteLength>20||users.size===0)return;try{const dv=new DataView(buf),str=rStr(dv,6);if(str&&/^\-?\d+$/.test(str.v)){const idx=parseInt(str.v);if(idx>=0&&idx<2000){const uid=roomIdxMap.get(idx);if(uid&&users.has(uid)){users.delete(uid);roomIdxMap.delete(idx);uiUsers();uiVU();}}}else if(buf.byteLength===10){const idx=dv.getInt32(6);if(idx>=0&&idx<2000){const uid=roomIdxMap.get(idx);if(uid&&users.has(uid)){users.delete(uid);roomIdxMap.delete(idx);uiUsers();uiVU();}}}}catch(e){}}
 
-    // ═══ FLOOD — Worker ═══
+    // ═══ FLOOD — Worker nativo quando disponível ═══
     function getTargetRIdx(){const u=selId?users.get(selId):null;return(u&&u.roomIdx>=0)?u.roomIdx:preClickVal;}
     function doClick(){if(gs?.readyState!==WebSocket.OPEN||!selId)return;sendClick(selId);}
-    function startFlood(){if(!selId||gs?.readyState!==WebSocket.OPEN)return;looping=true;doClick();loopTimer=setInterval(doClick,ms);queueMicrotask(()=>uiStatus());}
-    function stopFlood(){if(loopTimer){clearInterval(loopTimer);loopTimer=null;}looping=false;uiStatus();}
+    function startFlood(){if(!selId||gs?.readyState!==WebSocket.OPEN)return;looping=true;if(isWorkerSocket&&gs.floodStart){gs.floodStart(selId,ms,getTargetRIdx());}else{doClick();loopTimer=setInterval(doClick,ms);}queueMicrotask(()=>uiStatus());}
+    function stopFlood(){if(isWorkerSocket&&gs?.floodStop)gs.floodStop();if(loopTimer){clearInterval(loopTimer);loopTimer=null;}looping=false;uiStatus();}
 
     // ═══ DNA PARTICLES ═══
     let dnaCanvas=null,dnaAnim=null,dnaP=[];
@@ -660,7 +660,7 @@
 <div class="xl">Chat</div>
 <div class="xm-chat"><div class="xm-dot off" id="rxCD"></div><span style="color:var(--rx-dim)">Aguardando</span></div>
 <div class="xdv"></div><div class="xl">Macros</div>
-${[1,2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type="text" id="rxM${i}" value="${i===0?':push':i===1?':pull':''}" placeholder="mensagem..."><div class="xmtg${i<2?' on':''}" id="rxMT${i}"></div><div class="xmtg-label">+Alvo</div></div>`).join('')}
+${[2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type="text" id="rxM${i}" value="${i===0?':push':i===1?':pull':''}" placeholder="mensagem..."><div class="xmtg${i<2?' on':''}" id="rxMT${i}"></div><div class="xmtg-label">+Alvo</div></div>`).join('')}
 </div>
 <div class="xtc" id="rxTabVolley">
 <div class="xl" id="rxVTitle">Volleyball</div>
@@ -720,7 +720,7 @@ ${[1,2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type
 
         document.getElementById('rxDCMouse').addEventListener('click',function(e){e.stopPropagation();dcMouseEnabled=!dcMouseEnabled;this.classList.toggle('on',dcMouseEnabled);});
         document.getElementById('rxDCF1').addEventListener('click',function(e){e.stopPropagation();dcF1Enabled=!dcF1Enabled;this.classList.toggle('on',dcF1Enabled);});
-        for(let i=0;i<7;i++){document.getElementById(`rxM${i}`)?.addEventListener('input',function(){macros[i].text=this.value;});document.getElementById(`rxMT${i}`)?.addEventListener('click',function(e){e.stopPropagation();macros[i].withTarget=!macros[i].withTarget;this.classList.toggle('on',macros[i].withTarget);});}
+        for(let i=0;i<6;i++){document.getElementById(`rxM${i}`)?.addEventListener('input',function(){macros[i].text=this.value;});document.getElementById(`rxMT${i}`)?.addEventListener('click',function(e){e.stopPropagation();macros[i].withTarget=!macros[i].withTarget;this.classList.toggle('on',macros[i].withTarget);});}
         document.getElementById('rxVRoom').addEventListener('change',function(){vRoom=this.value;vCoordBounds=null;vAllTilesCache=null;vZoneSets=null;calcBounds();uiVS();});
         document.getElementById('rxVATG').addEventListener('click',function(e){
             e.stopPropagation();
@@ -810,12 +810,12 @@ ${[1,2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type
     document.addEventListener('keydown',e=>{
         if(e.keyCode===119){e.preventDefault();panelOpen=!panelOpen;document.getElementById('rx')?.classList.toggle('vis',panelOpen);return;}
         if(e.keyCode===112)return;
-        const fm=e.key.match(/^F([1-7])$/);
+        const fm=e.key.match(/^F([2-7])$/);
         if(fm){
             e.preventDefault();
             e.stopPropagation();
             if(isOurInput(document.activeElement))return;
-            sendMacro(parseInt(fm[1])-1);
+            sendMacro(parseInt(fm[1])-2);
             return;
         }
         if(!hkEnabled||e.repeat)return;
@@ -823,7 +823,7 @@ ${[1,2,3,4,5,6,7].map((n,i)=>`<div class="xmrow"><label>F${n}</label><input type
         if(mod){e.preventDefault();if(hkHold){if(!looping)startFlood();}else{looping?stopFlood():startFlood();}}
     },true);
 
-    document.addEventListener('keyup',e=>{if(/^F[1-7]$/.test(e.key)){e.preventDefault();e.stopPropagation();return;}if(!hkEnabled||!hkHold)return;const mod=(hkMod==='alt'&&e.key==='Alt')||(hkMod==='ctrl'&&e.key==='Control')||(hkMod==='shift'&&e.key==='Shift');if(mod&&looping){e.preventDefault();stopFlood();}},true);
+    document.addEventListener('keyup',e=>{if(/^F[2-7]$/.test(e.key)){e.preventDefault();e.stopPropagation();return;}if(!hkEnabled||!hkHold)return;const mod=(hkMod==='alt'&&e.key==='Alt')||(hkMod==='ctrl'&&e.key==='Control')||(hkMod==='shift'&&e.key==='Shift');if(mod&&looping){e.preventDefault();stopFlood();}},true);
 
     function addIcon(){
         if(document.getElementById('rx-icon'))return;
