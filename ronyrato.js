@@ -698,8 +698,59 @@
     // ═══════════════════════════════════════════════════════
     function dvMatchCase(orig,result){if(!orig||!result)return result;if(orig===orig.toUpperCase())return result.toUpperCase();if(orig[0]===orig[0].toUpperCase())return result[0].toUpperCase()+result.slice(1);return result;}
     function dvCleanMsg(msg){return msg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/^(tema\s*:?\s*)/i,'').trim();}
-    function dvMatchTheme(msg,aliases){const m=dvCleanMsg(msg);if(!m)return false;for(const a of aliases){if(a===m)return true;if(m.length>=3&&a.length>=4&&a.startsWith(m))return true;}return false;}
-    function dvPickDB(db,letters){const used={};return letters.map(l=>{const arr=db[l];if(!arr||!arr.length)return l;if(!used[l])used[l]=0;const w=arr[Math.min(used[l],arr.length-1)];used[l]++;return w;}).join(' ');}
+    function dvMatchTheme(msg,aliases){
+        const m=dvCleanMsg(msg);
+        if(!m||m.length<2)return false;
+        for(const a of aliases){
+            // 1. Exato
+            if(a===m)return true;
+            // 2. Alias é prefixo da mensagem — "somatoria tropa" → alias "somatoria" + espaço
+            if(a.length>=3&&m.length>a.length&&m[a.length]===' '&&m.startsWith(a))return true;
+            // 3. Prefixo limpo: alias começa com o que o user digitou (min 3 chars)
+            if(m.length>=3&&a.length>=4&&a.startsWith(m))return true;
+            // 4. Prefixo fuzzy: compara input com os primeiros N chars do alias
+            if(m.length>=4&&a.length>m.length&&dvLevenshtein(m,a.slice(0,m.length))<=1)return true;
+            // 5. Fuzzy completo: tolera erros de digitação
+            if(m.length>=4){const tol=Math.max(1,Math.min(3,Math.floor(m.length/4)));if(dvLevenshtein(m,a)<=tol)return true;}
+        }
+        return false;
+    }
+    function dvDetectTheme(msg){
+        // 1. Mensagem completa
+        for(const[k,t]of Object.entries(DV_TEMAS)){if(t.match(msg))return k;}
+        // 2. Tenta fatias de 3→2→1 palavras — captura "somatoria tropa", "repita comigo pessoal"
+        const parts=dvCleanMsg(msg).split(/\s+/);
+        if(parts.length>1){
+            for(let n=Math.min(3,parts.length-1);n>=1;n--){
+                const chunk=parts.slice(0,n).join(' ');
+                if(chunk.length<2)continue;
+                for(const[k,t]of Object.entries(DV_TEMAS)){if(t.match(chunk))return k;}
+            }
+        }
+        return null;
+    }
+    function dvPickDB(db,letters){
+        // Monta cache por letra: agrupa por tamanho, embaralha cada grupo (Fisher-Yates),
+        // depois concatena curto→longo — randomizado mas palavras curtas primeiro
+        const cache={};
+        return letters.map(l=>{
+            const arr=db[l];
+            if(!arr||!arr.length)return l;
+            if(!cache[l]){
+                const byLen={};
+                for(const w of arr){if(!byLen[w.length])byLen[w.length]=[];byLen[w.length].push(w);}
+                const result=[];
+                for(const len of Object.keys(byLen).sort((a,b)=>a-b)){
+                    const g=byLen[len];
+                    for(let i=g.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[g[i],g[j]]=[g[j],g[i]];}
+                    result.push(...g);
+                }
+                cache[l]={arr:result,i:0};
+            }
+            const e=cache[l];
+            return e.arr[e.i++%e.arr.length];
+        }).join(' ');
+    }
     function dvLevenshtein(a,b){const m=a.length,n=b.length,d=[];for(let i=0;i<=m;i++){d[i]=[i];for(let j=1;j<=n;j++)d[i][j]=i===0?j:0;}for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return d[m][n];}
     const _dvDbKeys=new WeakMap();
     function dvFuzzyFind(db,input){const clean=input.normalize('NFD').replace(/[\u0300-\u036f]/g,'');if(db[input])return db[input];if(db[clean])return db[clean];const maxDist=Math.max(1,Math.min(3,Math.floor(input.length*0.3)));if(!_dvDbKeys.has(db))_dvDbKeys.set(db,Object.keys(db));const keys=_dvDbKeys.get(db);let best=null,bestDist=999;for(const k of keys){if(Math.abs(k.length-input.length)>maxDist)continue;const kc=k.normalize('NFD').replace(/[\u0300-\u036f]/g,'');const d=Math.min(dvLevenshtein(input,k),dvLevenshtein(clean,kc));if(d<bestDist&&d<=maxDist){bestDist=d;best=k;}}return best?db[best]:null;}
@@ -724,46 +775,45 @@
     const DV_LETRA_NOMES={a:'a',b:'be',c:'ce',d:'de',e:'e',f:'efe',g:'ge',h:'aga',i:'i',j:'jota',k:'ka',l:'ele',m:'eme',n:'ene',o:'o',p:'pe',q:'que',r:'erre',s:'esse',t:'te',u:'u',v:'ve',w:'dablio',x:'xis',y:'ipsilon',z:'ze'};
     const DV_TEMAS={
         repita:{desc:'Repita Comigo',match(m){return dvMatchTheme(m,['repita comigo','repita cmg','repita','repete','repete comigo','repete cmg']);},process(p){return p.trim();}},
-        gerundio:{desc:'Gerundio',match(m){return dvMatchTheme(m,['gerundio','gers']);},process(p){return p.trim().split(/\s+/).map(dvToGerundio).join(' ');}},
-        aumentativo:{desc:'Aumentativo',match(m){return dvMatchTheme(m,['aumentativo']);},process(p){return p.trim().split(/\s+/).map(dvToAumentativo).join(' ');}},
-        diminutivo:{desc:'Diminutivo',match(m){return dvMatchTheme(m,['diminutivo']);},process(p){return p.trim().split(/\s+/).map(dvToDiminutivo).join(' ');}},
-        plural:{desc:'Plural',match(m){return dvMatchTheme(m,['plural']);},process(p){return p.trim().split(/\s+/).map(dvToPlural).join(' ');}},
-        contrario:{desc:'Contrario',match(m){return dvMatchTheme(m,['contrario']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].reverse().join('')).join(' ');}},
-        antonimo:{desc:'Antonimo',match(m){return dvMatchTheme(m,['antonimo']);},process(p){return p.trim().split(/\s+/).map(w=>dvFuzzyFind(DV_ANTONIMOS,w.toLowerCase())||w).join(' ');}},
-        passado:{desc:'Passado',match(m){return dvMatchTheme(m,['passado']);},process(p){return p.trim().split(/\s+/).map(dvToPassado).join(' ');}},
-        futuro:{desc:'Futuro',match(m){return dvMatchTheme(m,['futuro']);},process(p){return p.trim().split(/\s+/).map(dvToFuturo).join(' ');}},
+        gerundio:{desc:'Gerundio',match(m){return dvMatchTheme(m,['gerundio','gerundio','gerun','gerund','gers','ger']);},process(p){return p.trim().split(/\s+/).map(dvToGerundio).join(' ');}},
+        aumentativo:{desc:'Aumentativo',match(m){return dvMatchTheme(m,['aumentativo','aumenta','aument','aum']);},process(p){return p.trim().split(/\s+/).map(dvToAumentativo).join(' ');}},
+        diminutivo:{desc:'Diminutivo',match(m){return dvMatchTheme(m,['diminutivo','diminu','dimin','dim']);},process(p){return p.trim().split(/\s+/).map(dvToDiminutivo).join(' ');}},
+        plural:{desc:'Plural',match(m){return dvMatchTheme(m,['plural','plur','pl']);},process(p){return p.trim().split(/\s+/).map(dvToPlural).join(' ');}},
+        contrario:{desc:'Contrario',match(m){return dvMatchTheme(m,['contrario','contra','contr']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].reverse().join('')).join(' ');}},
+        antonimo:{desc:'Antonimo',match(m){return dvMatchTheme(m,['antonimo','antoni','anton','ant']);},process(p){return p.trim().split(/\s+/).map(w=>dvFuzzyFind(DV_ANTONIMOS,w.toLowerCase())||w).join(' ');}},
+        passado:{desc:'Passado',match(m){return dvMatchTheme(m,['passado','passa','pass','pas']);},process(p){return p.trim().split(/\s+/).map(dvToPassado).join(' ');}},
+        futuro:{desc:'Futuro',match(m){return dvMatchTheme(m,['futuro','futur','fut']);},process(p){return p.trim().split(/\s+/).map(dvToFuturo).join(' ');}},
         cores:{desc:'Cores',match(m){return dvMatchTheme(m,['cores','cor']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_CORES,l):p;}},
         cep:{desc:'CEP',match(m){return dvMatchTheme(m,['cep','cidade estado pais','cidade']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_CEP,l):p;}},
-        antecessor:{desc:'Antecessor',match(m){return dvMatchTheme(m,['antecessor']);},process(p){return p.trim().split(/\s+/).map(w=>{const n=parseInt(w);return isNaN(n)?w:String(n-1);}).join(' ');}},
-        sucessor:{desc:'Sucessor',match(m){return dvMatchTheme(m,['sucessor','suce']);},process(p){return p.trim().split(/\s+/).map(w=>{const n=parseInt(w);return isNaN(n)?w:String(n+1);}).join(' ');}},
-        consoantes:{desc:'Consoantes',match(m){return dvMatchTheme(m,['consoantes','consoante']);},process(p){return p.trim().split(/\s+/).map(w=>w.replace(/[aeiouAEIOU\u00e1\u00e0\u00e2\u00e3\u00e9\u00e8\u00ea\u00ed\u00ec\u00ee\u00f3\u00f2\u00f4\u00f5\u00fa\u00f9\u00fb\u00c1\u00c0\u00c2\u00c3\u00c9\u00c8\u00ca\u00cd\u00cc\u00ce\u00d3\u00d2\u00d4\u00d5\u00da\u00d9\u00db]/g,'')).join(' ');}},
-        vogais:{desc:'Vogais',match(m){return dvMatchTheme(m,['vogais','vog']);},process(p){return p.trim().split(/\s+/).map(w=>w.replace(/[^aeiouAEIOU\u00e1\u00e0\u00e2\u00e3\u00e9\u00e8\u00ea\u00ed\u00ec\u00ee\u00f3\u00f2\u00f4\u00f5\u00fa\u00f9\u00fb\u00c1\u00c0\u00c2\u00c3\u00c9\u00c8\u00ca\u00cd\u00cc\u00ce\u00d3\u00d2\u00d4\u00d5\u00da\u00d9\u00db]/g,'')).join(' ');}},
-        soletrando:{desc:'Soletrando',match(m){return dvMatchTheme(m,['soletrando','soletrar','solet']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].join(' ')).join('  ');}},
-        consoletrando:{desc:'Consoletrando',match(m){return dvMatchTheme(m,['consoletrando','consol']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].filter(c=>/[^aeiou\u00e1\u00e9\u00ed\u00f3\u00fa\u00e2\u00ea\u00f4\u00e3\u00f5\u00e0\u00e8\u00ec\u00f2\u00f9\s]/i.test(c)).join(' ')).join('  ');}},
-        acentue:{desc:'Acentue',match(m){return dvMatchTheme(m,['acentue','acento','acentuacao','acentuar']);},process(p){const map={a:'\u00e1',e:'\u00e9',i:'\u00ed',o:'\u00f3',u:'\u00fa',A:'\u00c1',E:'\u00c9',I:'\u00cd',O:'\u00d3',U:'\u00da'};return p.trim().replace(/[aeiouAEIOU]/g,v=>map[v]||v);}},
-        capitais:{desc:'Capitais',match(m){return dvMatchTheme(m,['capitais','capital','cap']);},process(p){return dvSmartLookup(DV_CAPITAIS,p);}},
-        extenso:{desc:'Extenso',match(m){return dvMatchTheme(m,['extenso','ext']);},process(p){return p.trim().split(/\s+/).map(w=>{const n=parseInt(w);return isNaN(n)?w:dvNumExtenso(n);}).join(' ');}},
-        frutas:{desc:'Frutas',match(m){return dvMatchTheme(m,['frutas','fruta','frut']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_FRUTAS,l):p;}},
-        nomes:{desc:'Nomes',match(m){return dvMatchTheme(m,['nomes','nome','nom']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_NOMES,l):p;}},
-        verbos:{desc:'Verbos',match(m){return dvMatchTheme(m,['verbos','verbo','verb']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_VERBOS,l):p;}},
-        gaguejando:{desc:'Gaguejando',match(m){return dvMatchTheme(m,['gaguejando','gagueje','gag']);},process(p){const mt=p.trim().match(/^(.+?)\s+(\d+)\s*x?\s*$/i)||p.trim().match(/^(.+?)\s+x\s*(\d+)\s*$/i);if(mt)return Array(Math.min(parseInt(mt[2]),30)).fill(mt[1].trim()).join(' ');return p;}},
-        infinitivo:{desc:'Infinitivo',match(m){return dvMatchTheme(m,['infinitivo','infs','inf']);},process(p){return p.trim().split(/\s+/).map(dvToInfinitivo).join(' ');}},
-        if_tema:{desc:'Inicial/Final',match(m){return dvMatchTheme(m,['inicial final','inicial e final','if','i/f']);},process(p){return p.trim().split(/\s+/).map(w=>w.length>=2?w[0]+w[w.length-1]:w).join(' ');}},
-        fi_tema:{desc:'Final/Inicial',match(m){return dvMatchTheme(m,['final inicial','final e inicial','fi','f/i']);},process(p){return p.trim().split(/\s+/).map(w=>w.length>=2?w[w.length-1]+w[0]:w).join(' ');}},
-        jr:{desc:'Jogo Rapido',match(m){return dvMatchTheme(m,['jogo rapido','jr']);},process(p){return dvFuzzyFind(DV_JR,p.trim().toLowerCase())||p;}},
-        letrenso:{desc:'Letrenso',match(m){return dvMatchTheme(m,['letrenso','letr']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>DV_LETRA_NOMES[c.toLowerCase()]||c).join(' ')).join('  ');}},
-        linguadoi:{desc:'Lingua do I',match(m){return dvMatchTheme(m,['lingua do i','linguadoi','li']);},process(p){return p.trim().replace(/[aeou\u00e1\u00e9\u00f3\u00fa\u00e0\u00e8\u00f2\u00f9\u00e2\u00ea\u00f4\u00e3\u00f5]/gi,c=>c===c.toUpperCase()?'I':'i');}},
-        nospace:{desc:'NoSpace',match(m){return dvMatchTheme(m,['nospace','no space','sem espaco','sem espaco']);},process(p){return p.trim().replace(/\s+/g,'');}},
-        redigitando:{desc:'Redigitando',match(m){return dvMatchTheme(m,['redigitando','redigite','redig']);},process(p){const mp={a:'4',e:'3',i:'1',o:'0',u:'u',A:'4',E:'3',I:'1',O:'0',U:'U'};return p.trim().replace(/[aeiouAEIOU]/g,v=>mp[v]||v);}},
-        comigorepita:{desc:'Comigo Repita',match(m){return dvMatchTheme(m,['comigo repita','cmg repita','comigo repeta']);},process(p){return p.trim().split(/\s+/).reverse().join(' ');}},
-        solepicando:{desc:'Solepicando',match(m){return dvMatchTheme(m,['solepicando','solep']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>c+c).join(' ')).join('  ');}},
-        solevogais:{desc:'Solevogais',match(m){return dvMatchTheme(m,['solevogais','solev']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].filter(c=>/[aeiou\u00e1\u00e9\u00ed\u00f3\u00fa\u00e2\u00ea\u00f4\u00e3\u00f5\u00e0\u00e8\u00ec\u00f2\u00f9]/i.test(c)).join(' ')).join('  ');}},
-        somatoria:{desc:'Somatoria',match(m){return dvMatchTheme(m,['somatoria','soma','som']);},process(p){const ns=p.trim().replace(/\+/g,' ').split(/\s+/).map(Number).filter(n=>!isNaN(n));return ns.length?String(ns.reduce((a,b)=>a+b,0)):p;}},
-        decompondo:{desc:'Decompondo V2',match(m){return dvMatchTheme(m,['decompondo','decompondo v2','dec','dec v2']);},process(p){return p.trim().split(/\s+/).map(w=>dvFuzzyFind(DV_PALAVRAS_NUMS,w.toLowerCase())||w).join(' ');}},
-        duplicando:{desc:'Duplicando',match(m){return dvMatchTheme(m,['duplicando','dupl','duplic']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>c+c).join('')).join(' ');}},
-        triplicando:{desc:'Triplicando',match(m){return dvMatchTheme(m,['triplicando','tripl','triplic']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>c+c+c).join('')).join(' ');}},
+        antecessor:{desc:'Antecessor',match(m){return dvMatchTheme(m,['antecessor','anteces','antece','antec']);},process(p){return p.trim().split(/\s+/).map(w=>{const n=parseInt(w);return isNaN(n)?w:String(n-1);}).join(' ');}},
+        sucessor:{desc:'Sucessor',match(m){return dvMatchTheme(m,['sucessor','sucess','suces','suce','suc']);},process(p){return p.trim().split(/\s+/).map(w=>{const n=parseInt(w);return isNaN(n)?w:String(n+1);}).join(' ');}},
+        consoantes:{desc:'Consoantes',match(m){return dvMatchTheme(m,['consoantes','consoante','consoant','consoan','conso']);},process(p){return p.trim().split(/\s+/).map(w=>w.replace(/[aeiouAEIOU\u00e1\u00e0\u00e2\u00e3\u00e9\u00e8\u00ea\u00ed\u00ec\u00ee\u00f3\u00f2\u00f4\u00f5\u00fa\u00f9\u00fb\u00c1\u00c0\u00c2\u00c3\u00c9\u00c8\u00ca\u00cd\u00cc\u00ce\u00d3\u00d2\u00d4\u00d5\u00da\u00d9\u00db]/g,'')).join(' ');}},
+        vogais:{desc:'Vogais',match(m){return dvMatchTheme(m,['vogais','vogai','vogal','vog']);},process(p){return p.trim().split(/\s+/).map(w=>w.replace(/[^aeiouAEIOU\u00e1\u00e0\u00e2\u00e3\u00e9\u00e8\u00ea\u00ed\u00ec\u00ee\u00f3\u00f2\u00f4\u00f5\u00fa\u00f9\u00fb\u00c1\u00c0\u00c2\u00c3\u00c9\u00c8\u00ca\u00cd\u00cc\u00ce\u00d3\u00d2\u00d4\u00d5\u00da\u00d9\u00db]/g,'')).join(' ');}},
+        soletrando:{desc:'Soletrando',match(m){return dvMatchTheme(m,['soletrando','soletrand','soletran','soletra','soletr','solet','sole']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].join(' ')).join('  ');}},
+        consoletrando:{desc:'Consoletrando',match(m){return dvMatchTheme(m,['consoletrando','consoletrando','consoletrand','consoletran','consoletra','consoletre','consoletr','consol']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].filter(c=>/[^aeiou\u00e1\u00e9\u00ed\u00f3\u00fa\u00e2\u00ea\u00f4\u00e3\u00f5\u00e0\u00e8\u00ec\u00f2\u00f9\s]/i.test(c)).join(' ')).join('  ');}},
+        acentue:{desc:'Acentue',match(m){return dvMatchTheme(m,['acentue','acento','acentuacao','acentuar','acentu','acent','acen']);},process(p){const map={a:'\u00e1',e:'\u00e9',i:'\u00ed',o:'\u00f3',u:'\u00fa',A:'\u00c1',E:'\u00c9',I:'\u00cd',O:'\u00d3',U:'\u00da'};return p.trim().replace(/[aeiouAEIOU]/g,v=>map[v]||v);}},
+        capitais:{desc:'Capitais',match(m){return dvMatchTheme(m,['capitais','capital','capitu','capit','capi','cap']);},process(p){return dvSmartLookup(DV_CAPITAIS,p);}},
+        extenso:{desc:'Extenso',match(m){return dvMatchTheme(m,['extenso','exten','exte','ext']);},process(p){return p.trim().split(/\s+/).map(w=>{const n=parseInt(w);return isNaN(n)?w:dvNumExtenso(n);}).join(' ');}},
+        frutas:{desc:'Frutas',match(m){return dvMatchTheme(m,['frutas','fruta','frut','fru']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_FRUTAS,l):p;}},
+        nomes:{desc:'Nomes',match(m){return dvMatchTheme(m,['nomes','nome','nom','nom']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_NOMES,l):p;}},
+        verbos:{desc:'Verbos',match(m){return dvMatchTheme(m,['verbos','verbo','verb','ver']);},process(p){const l=p.trim().toLowerCase().replace(/[^a-z]/g,'').split('');return l.length?dvPickDB(DV_VERBOS,l):p;}},
+        gaguejando:{desc:'Gaguejando',match(m){return dvMatchTheme(m,['gaguejando','gaguejand','guejando','gagueje','gaguej','gague','gag']);},process(p){const mt=p.trim().match(/^(.+?)\s+(\d+)\s*x?\s*$/i)||p.trim().match(/^(.+?)\s+x\s*(\d+)\s*$/i);if(mt)return Array(Math.min(parseInt(mt[2]),30)).fill(mt[1].trim()).join(' ');return p;}},
+        infinitivo:{desc:'Infinitivo',match(m){return dvMatchTheme(m,['infinitivo','infinit','infini','infs','inf']);},process(p){return p.trim().split(/\s+/).map(dvToInfinitivo).join(' ');}},
+        if_tema:{desc:'Inicial/Final',match(m){return dvMatchTheme(m,['inicial final','inicial e final','inic final','if','i/f']);},process(p){return p.trim().split(/\s+/).map(w=>w.length>=2?w[0]+w[w.length-1]:w).join(' ');}},
+        fi_tema:{desc:'Final/Inicial',match(m){return dvMatchTheme(m,['final inicial','final e inicial','fin inicial','fi','f/i']);},process(p){return p.trim().split(/\s+/).map(w=>w.length>=2?w[w.length-1]+w[0]:w).join(' ');}},
+        jr:{desc:'Jogo Rapido',match(m){return dvMatchTheme(m,['jogo rapido','jogo rap','jogorapido','jr']);},process(p){return dvFuzzyFind(DV_JR,p.trim().toLowerCase())||p;}},
+        letrenso:{desc:'Letrenso',match(m){return dvMatchTheme(m,['letrenso','letrenso','letren','letre','letr']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>DV_LETRA_NOMES[c.toLowerCase()]||c).join(' ')).join('  ');}},
+        linguadoi:{desc:'Lingua do I',match(m){return dvMatchTheme(m,['lingua do i','lingua doi','linguadoi','lingdoi','li']);},process(p){return p.trim().replace(/[aeou\u00e1\u00e9\u00f3\u00fa\u00e0\u00e8\u00f2\u00f9\u00e2\u00ea\u00f4\u00e3\u00f5]/gi,c=>c===c.toUpperCase()?'I':'i');}},
+        nospace:{desc:'NoSpace',match(m){return dvMatchTheme(m,['nospace','no space','semespaco','sem espaco','sem espa']);},process(p){return p.trim().replace(/\s+/g,'');}},
+        redigitando:{desc:'Redigitando',match(m){return dvMatchTheme(m,['redigitando','redigitand','redigitan','redigita','redigit','redigite','redig','redi']);},process(p){const mp={a:'4',e:'3',i:'1',o:'0',u:'u',A:'4',E:'3',I:'1',O:'0',U:'U'};return p.trim().replace(/[aeiouAEIOU]/g,v=>mp[v]||v);}},
+        comigorepita:{desc:'Comigo Repita',match(m){return dvMatchTheme(m,['comigo repita','cmg repita','comigo repeta','cmg rep','comigo rep']);},process(p){return p.trim().split(/\s+/).reverse().join(' ');}},
+        solepicando:{desc:'Solepicando',match(m){return dvMatchTheme(m,['solepicando','solepicand','solepican','solepica','solepic','solepi','solep']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>c+c).join(' ')).join('  ');}},
+        solevogais:{desc:'Solevogais',match(m){return dvMatchTheme(m,['solevogais','solevogai','solevog','solevo','solev']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].filter(c=>/[aeiou\u00e1\u00e9\u00ed\u00f3\u00fa\u00e2\u00ea\u00f4\u00e3\u00f5\u00e0\u00e8\u00ec\u00f2\u00f9]/i.test(c)).join(' ')).join('  ');}},
+        somatoria:{desc:'Somatoria',match(m){return dvMatchTheme(m,['somatoria','somator','somato','somat','soma','som']);},process(p){const ns=p.trim().replace(/\+/g,' ').split(/\s+/).map(Number).filter(n=>!isNaN(n));return ns.length?String(ns.reduce((a,b)=>a+b,0)):p;}},
+        decompondo:{desc:'Decompondo V2',match(m){return dvMatchTheme(m,['decompondo','decompondo v2','decompon','decompo','decomp','deco','dec','dec v2']);},process(p){return p.trim().split(/\s+/).map(w=>dvFuzzyFind(DV_PALAVRAS_NUMS,w.toLowerCase())||w).join(' ');}},
+        duplicando:{desc:'Duplicando',match(m){return dvMatchTheme(m,['duplicando','duplicand','duplican','duplica','duplic','dupli','dupl']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>c+c).join('')).join(' ');}},
+        triplicando:{desc:'Triplicando',match(m){return dvMatchTheme(m,['triplicando','triplicand','triplican','triplica','triplic','tripli','tripl']);},process(p){return p.trim().split(/\s+/).map(w=>[...w].map(c=>c+c+c).join('')).join(' ');}},
     };
-    function dvDetectTheme(msg){for(const[k,t]of Object.entries(DV_TEMAS)){if(t.match(msg))return k;}return null;}
     function dvOnHostChat(msg){
         if(!dvCurrentTheme){const t=dvDetectTheme(msg);if(t){dvCurrentTheme=t;dvWaitingAnswer=true;dvUiTheme(DV_TEMAS[t].desc);return;}}
         if(dvCurrentTheme&&dvWaitingAnswer){const tema=DV_TEMAS[dvCurrentTheme];let ans=tema.process(msg);if(ans&&dvEnabled){const exact=dvCurrentTheme==='repita'||dvCurrentTheme==='comigorepita';if(!exact){ans=ans.toLowerCase().normalize('NFD').replace(/[\u0300-\u0326\u0328-\u036f]/g,'').normalize('NFC');if(dvUseDot&&!ans.endsWith('.'))ans+='.';}setTimeout(()=>dvSendChat(ans),dvDelayMs);}dvCurrentTheme=null;dvWaitingAnswer=false;dvUiTheme(null);}
