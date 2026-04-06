@@ -787,41 +787,33 @@
         dnaCanvas=document.createElement('canvas');
         dnaCanvas.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;border-radius:12px';
         el.insertBefore(dnaCanvas,el.firstChild);
-        const N=32,LINK=90;
-        // FIX: cache ctx e dimensões — nunca lê offsetWidth dentro do loop de draw
+        const N=65,LINK=110;
+        const cols=['255,255,255'];
+        // FIX: ctx e dimensões cacheados — nunca lê offsetWidth dentro do draw
         const ctx=dnaCanvas.getContext('2d');
         let cw=0,ch=0,frameSkip=0;
-        function resizeDNA(){
-            const nw=dnaCanvas.offsetWidth*2,nh=dnaCanvas.offsetHeight*2;
-            if(nw&&nh&&(nw!==cw||nh!==ch)){cw=dnaCanvas.width=nw;ch=dnaCanvas.height=nh;}
-        }
-        // Lê dimensões uma vez ao iniciar e a cada 2s (não a cada frame)
-        const resizeTimer=setInterval(()=>{if(dnaRunning)resizeDNA();},2000);
-        function mk(w,h){return{x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-0.5)*0.5,vy:(Math.random()-0.5)*0.5,r:1.5+Math.random()*2,a:0.5+Math.random()*0.4,ph:Math.random()*6.28,ps:0.5+Math.random()*1.5};}
+        function resizeDNA(){const nw=dnaCanvas.offsetWidth*2,nh=dnaCanvas.offsetHeight*2;if(nw&&nh&&(nw!==cw||nh!==ch)){cw=dnaCanvas.width=nw;ch=dnaCanvas.height=nh;}}
+        setInterval(()=>{if(dnaRunning)resizeDNA();},2000);
+        function mk(w,h){return{x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-0.5)*0.7,vy:(Math.random()-0.5)*0.7,r:1.5+Math.random()*2.5,c:cols[Math.floor(Math.random()*cols.length)],a:0.6+Math.random()*0.4,ph:Math.random()*6.28,ps:0.6+Math.random()*1.8};}
         dnaDraw=()=>{
             if(!dnaRunning)return;
-            // Throttle: só desenha 1 em cada 2 frames (~30fps) — imperceptível visualmente, metade do custo
-            frameSkip^=1;
-            if(frameSkip){dnaAnim=requestAnimationFrame(dnaDraw);return;}
+            // Throttle ~30fps
+            frameSkip^=1;if(frameSkip){dnaAnim=requestAnimationFrame(dnaDraw);return;}
             if(!cw||!ch){resizeDNA();if(!cw||!ch){dnaAnim=requestAnimationFrame(dnaDraw);return;}}
             ctx.clearRect(0,0,cw,ch);
             while(dnaP.length<N)dnaP.push(mk(cw,ch));
             for(let i=dnaP.length-1;i>=0;i--){
-                const p=dnaP[i];p.x+=p.vx;p.y+=p.vy;p.ph+=0.025*p.ps;
-                p.vx+=(Math.random()-0.5)*0.03;p.vy+=(Math.random()-0.5)*0.03;
-                p.vx=Math.max(-0.6,Math.min(0.6,p.vx));p.vy=Math.max(-0.6,Math.min(0.6,p.vy));
+                const p=dnaP[i];p.x+=p.vx;p.y+=p.vy;p.ph+=0.02*p.ps;
+                p.vx+=(Math.random()-0.5)*0.04;p.vy+=(Math.random()-0.5)*0.04;
+                p.vx=Math.max(-0.8,Math.min(0.8,p.vx));p.vy=Math.max(-0.8,Math.min(0.8,p.vy));
                 if(p.x<-10)p.x=cw+5;if(p.x>cw+10)p.x=-5;if(p.y<-10)p.y=ch+5;if(p.y>ch+10)p.y=-5;
             }
-            // FIX: agrupa todas as linhas em um único path por nível de alpha (2 buckets)
-            ctx.beginPath();ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
-            for(let i=0;i<dnaP.length;i++){const a=dnaP[i];for(let j=i+1;j<dnaP.length;j++){const b=dnaP[j];const dx=a.x-b.x,dy=a.y-b.y,d=dx*dx+dy*dy;if(d<LINK*LINK){ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);}}}
+            // FIX: linhas em path único (era 1 stroke por par = até 2080 calls)
+            ctx.beginPath();ctx.lineWidth=1;ctx.strokeStyle='rgba(255,255,255,0.18)';
+            for(let i=0;i<dnaP.length;i++){const a=dnaP[i];for(let j=i+1;j<dnaP.length;j++){const b=dnaP[j];const dx=a.x-b.x,dy=a.y-b.y;if(dx*dx+dy*dy<LINK*LINK){ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);}}}
             ctx.stroke();
-            // FIX: 1 arc por partícula (era 4)
-            for(const p of dnaP){
-                const gl=0.5+0.5*Math.sin(p.ph),al=p.a*gl;
-                ctx.beginPath();ctx.arc(p.x,p.y,p.r*2+gl*3,0,6.28);
-                ctx.fillStyle=`rgba(255,255,255,${(al*0.55).toFixed(2)})`;ctx.fill();
-            }
+            // Partículas com visual original (4 camadas, brilho pulsante)
+            for(const p of dnaP){const gl=0.5+0.5*Math.sin(p.ph),al=p.a*gl;ctx.beginPath();ctx.arc(p.x,p.y,p.r*5+gl*7,0,6.28);ctx.fillStyle=`rgba(${p.c},${(al*0.12).toFixed(3)})`;ctx.fill();ctx.beginPath();ctx.arc(p.x,p.y,p.r*3+gl*3,0,6.28);ctx.fillStyle=`rgba(${p.c},${(al*0.25).toFixed(3)})`;ctx.fill();ctx.beginPath();ctx.arc(p.x,p.y,p.r*1.2+gl*0.8,0,6.28);ctx.fillStyle=`rgba(${p.c},${(al*0.85).toFixed(3)})`;ctx.fill();ctx.beginPath();ctx.arc(p.x,p.y,p.r*0.5,0,6.28);ctx.fillStyle=`rgba(255,255,255,${(al*0.7).toFixed(3)})`;ctx.fill();}
             dnaAnim=requestAnimationFrame(dnaDraw);
         };
         if(panelOpen)startDNA();
